@@ -57,6 +57,31 @@ The generated project must expose either `cann_bench.<op_snake>(...)` or
 `torch.ops.cann_bench.<op_snake>(...)`, preferably both through a Python wrapper
 that delegates to the torch op.
 
+## Packaging Template
+
+Treat direct-launch packaging files as infrastructure, not operator logic. Do
+not rewrite them from memory.
+
+Copy `cann-bench/examples/direct_launch_example/setup.py` verbatim for generated
+source-dir projects. It is intentionally operator-independent:
+
+- package name is always `cann_bench`
+- version is always `1.0.0`
+- it builds the CMake extension through a custom `cmake_build` command
+- it emits the required `cp38-abi3-linux_aarch64` wheel tag
+- it uses setuptools APIs compatible with the server environment
+
+Do not import `setuptools.command.clean.clean`, do not subclass
+`setuptools.command.build_ext.build_ext` for the CMake command, and do not invent
+an `options={'bdist_wheel': ...}` replacement for the `ABI3Wheel(bdist_wheel)`
+subclass. Those rewrites are packaging bugs, not simplifications.
+
+Evidence: Exp round 4 failed before CANN-Bench because generated `setup.py`
+rewrote the reference and imported removed setuptools API
+`setuptools.command.clean`; see
+`LOGS/ascend-superpowers-exp/round-4/build.log` and
+`LOGS/ascend-superpowers-exp/round-4/round.md`.
+
 ## Artifact Boundary
 
 Treat generated source as immutable benchmark evidence.
