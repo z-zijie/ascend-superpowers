@@ -302,6 +302,110 @@ float16 `dim=0` accuracy cases. The plugin moved `dim=0` to the last axis with
 kernel. This is a reusable layout rule for all direct-launch kernels, not a
 Softmax-specific rule.
 
+## Reduction And Selection Operators
+
+For reduction/select operators, derive axis, shape, output dtype, and special
+value behavior from the task files and `golden.py` before writing the kernel.
+Normalize negative axes on the host. Implement both `keepdim=true` and
+`keepdim=false` shape rules when the schema exposes `keepdim`, even if current
+CANN-Bench cases only cover one mode.
+
+For arg-reduction operators such as argmax or argmin, output indices must use
+the task-required integer dtype exactly. Do not return the input dtype, and do
+not narrow an `int64` index output to `int32`. Accuracy thresholds for index
+outputs are exact equality: any off-by-one, tie-break, dtype, or shape error is
+a real failure.
+
+Tie handling is part of correctness. When equal best values occur in the
+reduction slice, keep the first occurrence, i.e. the smallest index along the
+reduction axis. Avoid `>=` / `<=` replacement rules unless the golden explicitly
+requires last-index tie behavior. For all-equal or all-zero slices, the result
+should normally be index `0` for first-index operators.
+
+Floating special values must match the golden framework, not an intuitive
+finite-only ordering. Before implementing custom comparison logic, run a small
+Torch diagnostic for `NaN`, `+inf`, `-inf`, equal values, and multiple `NaN`
+positions, then record the result and the matching comparison rule in the run
+log. If Torch treats the first `NaN` as the winning argmax value, the generated
+comparison must preserve that behavior across tiles and across partial
+reductions.
+
+Tile-local reductions must carry best value, best index, and any `have_best`
+state across every tile in the same logical reduction slice. Do not declare a
+new best-value variable inside each tile loop and then only keep the best index
+outside the loop. This applies independently to float, half, bfloat16, int32,
+int64, and any other dtype branch. A quick diagnostic for tiled reducers should
+force more than one tile per logical row for each dtype family that has distinct
+comparison code.
+
+On the CANN-Bench server target, do not rely on scalar comparison or scalar
+`static_cast<float>` for `half` / `bfloat16_t` values inside AscendC AICore
+code. Bisheng may reject scalar `>` comparisons for `half`, and BF16 scalar
+casts can fail backend compilation. For FP16/BF16 comparison reducers, load the
+tile in the original dtype, use `AscendC::Cast` into a tile-local `float`
+`TBuf`/`LocalTensor`, and compare the float buffer while keeping the original
+index semantics.
+
+Keep AscendC platform APIs in files compiled by the AscendC toolchain.
+Host/plugin C++ files compiled by g++ should not include or call
+`platform_ascendc` directly unless the project already proves that linkage. If
+plugin code needs hardware parameters such as AI core count, use an existing
+host-safe API or expose a small helper from a kernel-side translation unit with
+matching C/C++ linkage declarations, then verify import so undefined symbols
+are caught before eval.
+
+For small `outer_size` with a large reduction dimension, one-row-per-core
+tiling can leave most AI cores idle and miss the CANN-Bench score target even
+when accuracy passes. Either use a proven CANN/library fallback that matches the
+task contract, or split the reduction dimension across cores and merge partial
+results with the same special-value and first-index tie rules as the full
+reduction. A split reducer must initialize and write a partial value/index for
+every participating `(logical row, block)` pair. Do not reuse the full-mode
+row-partition loop (`start_row = block_idx * rows_per_block`) for split mode
+when every block must contribute a slice of the same logical row; otherwise only
+block 0 writes valid partials for `outer_size == 1` and host-side merge reads
+uninitialized data.
+
+Do not assume that a scalar element-by-element AICore loop is performance-safe
+for reductions. Benchmark against the CANN-Bench baseline as soon as accuracy is
+mostly working. If most cases are far below baseline, changing tile size or
+minor loop structure is unlikely to reach a high score by itself; switch to a
+proven backend primitive, a vectorized/hierarchical reduction strategy, or a
+hybrid design that keeps correctness semantics while reducing per-element scalar
+work.
+
+For split reducers, define a stable partial layout such as
+`partial[row * num_blocks + block_idx]`, store both the slice-local best value
+and the slice-local best index, and merge in ascending block order. Convert a
+slice-local index to a global reduction-axis index with the same slice length
+used to compute the block's start offset. If host-side merge gathers candidate
+values from an NPU tensor, create the index tensor on the same device before
+calling `index_select` or equivalent Torch indexing APIs; the default CPU index
+tensor can fail at runtime. Quick checks should include tiny vectors,
+prime-sized 1D tensors, large 1D tensors, all-equal values, ties across block
+boundaries, NaN positions in different blocks, and winning values in the final
+tail block and at the last element before running the full CANN-Bench eval.
+
+Evidence: ArgMax round 1 exposed these reusable reduction/select rules. The
+first generated candidate failed integer cases because integer best-value state
+was reset per tile; after carrying typed best state across tiles, all 20 cases
+passed accuracy. The same round showed score 56.18 with one-row-per-core tiling
+and then exposed a split-mode correctness bug where only block 0 produced valid
+partials for `outer_size == 1`. A later split attempt also exposed host
+`index_select` device mismatch, slice-local-vs-global index merge errors, and
+tail-block failures for large 1D tensors whose winning value was in the last
+block. After those split bugs were fixed, ArgMax passed all 20 cases but still
+scored only about 57 because scalar reduction loops remained far below the
+CANN-Bench baseline on most cases. The same round also showed that direct
+`platform_ascendc` use from plugin code can fail to compile or import unless the
+helper is exposed with matching linkage. See
+`LOGS/ascend-superpowers-arg_max/round-1/claude-run.jsonl`,
+`LOGS/ascend-superpowers-arg_max/round-1/eval.log`, and
+`cann-bench/reports/eval_20260526_180709.json` /
+`cann-bench/reports/eval_20260526_182901.json` /
+`cann-bench/reports/eval_20260526_183942.json` /
+`cann-bench/reports/eval_20260526_184312.json`.
+
 ## AscendC API Policy
 
 Do not guess AscendC API signatures, headers, namespaces, type support, tiling
