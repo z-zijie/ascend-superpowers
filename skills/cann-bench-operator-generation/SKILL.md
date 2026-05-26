@@ -9,9 +9,9 @@ description: Use when generating or debugging Ascend CANN-Bench source-dir opera
 
 Generate Ascend CANN-Bench operator projects as benchmark artifacts, not as
 hand-maintained application code. The task files define the operator contract;
-the generated source-dir project is only valid if it builds, installs, imports,
-runs all CANN-Bench cases, passes accuracy, and scores without post-generation
-source edits.
+the delivered source-dir project is only valid if the final candidate builds,
+installs, imports, runs all CANN-Bench cases, passes accuracy, and scores with
+source-manifest evidence for that candidate.
 
 Use this skill for any operator request under `cann-bench/tasks/` that should
 produce a CANN-Bench `--source-dir` project under `generated/cannbench/<op>/`.
@@ -82,32 +82,37 @@ rewrote the reference and imported removed setuptools API
 `LOGS/ascend-superpowers-exp/round-4/build.log` and
 `LOGS/ascend-superpowers-exp/round-4/round.md`.
 
-## Artifact Boundary
+## Role Boundary And Candidate Freezing
 
-Treat generated source as immutable benchmark evidence.
+Codex orchestrates the loop and owns Harness changes. Do not hand-edit generated
+operator source from Codex. The server-side generator/debugger may iterate inside
+`generated/cannbench/<op>/` before delivery to fix build, runtime, accuracy, or
+score failures.
+
+Use source manifests as candidate evidence, not as a ban on generator-side
+debugging:
 
 1. Remove stale `generated/cannbench/<op>/` before a clean generation.
 2. Generate the complete source-dir project.
-3. Immediately create a source manifest before build or evaluation.
-4. Run build, install, import, and CANN-Bench evaluation against that artifact.
-5. If build, install, import, runtime, accuracy, or scoring fails, record the
-   failure and stop. Do not fix files inside `generated/cannbench/<op>/`.
-   This applies even when the fix looks mechanical or obvious.
+3. Build, install, import, and evaluate. If the generator fixes generated source,
+   treat that as a new candidate and record the fix in the round log.
+4. Before reporting a candidate as final or comparing a score, create a source
+   manifest for the exact source tree being evaluated.
+5. Do not edit source while reusing that candidate's build/eval result as
+   evidence. If source changes, create a new manifest and rerun the relevant
+   checks.
 
-Allowed generated-tree changes after the manifest are build/runtime artifacts
-only: `build/`, `dist/`, `*.egg-info`, `__pycache__/`, `.pytest_cache/`,
-compiled shared objects such as `*.so` copied into the Python package, reports,
-and profiler output. Source edits after the manifest invalidate the run. When
-comparing manifests, normalize paths relative to the generated project root and
-exclude those build/runtime artifact patterns in both snapshots.
+Allowed generated-tree changes that do not require a new source candidate are
+build/runtime artifacts only: `build/`, `dist/`, `*.egg-info`, `__pycache__/`,
+`.pytest_cache/`, compiled shared objects such as `*.so` copied into the Python
+package, reports, and profiler output. When comparing manifests, normalize paths
+relative to the generated project root and exclude those build/runtime artifact
+patterns in both snapshots.
 
-If a generated project fails during build after the source manifest is frozen,
-do not continue with "let me fix the generated source" edits. Write the build
-failure, exact compiler diagnostics, suspected reusable rule, evidence paths,
-and `continue` conclusion into the round log, then stop. Mac Codex owns the
-Harness update and fresh regeneration loop. Any source edit after the frozen
-manifest invalidates the run and must be treated as a loop failure, not as
-progress toward a valid score.
+If a failure reveals a reusable Harness gap, log the exact diagnostics, the
+generator-side workaround if one was attempted, evidence paths, and the proposed
+general rule. Mac Codex then updates `ascend-superpowers/` and starts a fresh
+or continued generation round with the improved Harness.
 
 ## Torch Registration Rules
 
@@ -228,8 +233,10 @@ lambda; see `LOGS/ascend-superpowers-softmax/round-1/claude-run.filtered.log`.
 ## AscendC API Policy
 
 Do not guess AscendC API signatures, headers, namespaces, type support, tiling
-contracts, or launch constraints. Search `asc-devkit/` first and record the
-evidence path in the run log.
+contracts, preprocessor availability, or launch constraints. Search both
+`asc-devkit/` and the installed CANN headers, then record the evidence paths in
+the run log. A declaration that exists behind an incompatible `__NPU_ARCH__`
+guard is not available for the target build.
 
 Examples of acceptable evidence:
 
@@ -237,9 +244,25 @@ Examples of acceptable evidence:
 - `asc-devkit/impl/...` implementation or checker showing type constraints
 - `asc-devkit/examples/...` example demonstrating correct usage
 - `asc-devkit/tests/...` test showing supported types or expected failures
+- `/home/developer/Ascend/cann-9.0.0/compiler/ascendc/include/...` installed
+  header defining the API and its `#if (__NPU_ARCH__ == ...)` guards
 
 If no evidence exists, treat the API assumption as unverified and avoid baking
 it into the generated project or this skill.
+
+For the CANN-Bench server target `NPU_ARCH=ascend910b` / `--npu-arch=dav-2201`,
+check scalar binary vector ops especially carefully. In installed CANN 9.0.0,
+`AscendC::Subs` Level 2 is guarded to NPU_ARCH 3510, 5102, 3003, and 3113, so it
+is unavailable on dav-2201. Use `AscendC::Adds(dst, src, -scalar, count)` for
+scalar subtraction on dav-2201. `AscendC::Adds` and `AscendC::Muls` Level 2 have
+been verified as available for dav-2201; do not assume `Subs` or `Divs` are
+available without checking the installed guard.
+
+Evidence: Softmax round 2 build failed because the generated kernel used
+`AscendC::Subs` for scalar max subtraction. The installed header
+`/home/developer/Ascend/cann-9.0.0/compiler/ascendc/include/basic_api/interface/kernel_operator_vec_binary_scalar_intf.h`
+contains the `Subs` guard excluding dav-2201; see
+`LOGS/ascend-superpowers-softmax/round-2/round.md`.
 
 Inside AscendC `__global__` / `__aicore__` kernels, do not use C++ lambdas to
 wrap tile processing, `AllocTensor`, `DataCopyPad`, vector math, or queue
