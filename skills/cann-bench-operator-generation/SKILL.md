@@ -264,6 +264,44 @@ Evidence: Softmax round 1 build failed because the generated plugin referenced
 structured-binding names `outer_size` and `reduce_size` inside the launch
 lambda; see `LOGS/ascend-superpowers-softmax/round-1/claude-run.filtered.log`.
 
+## Host Tensor Layout For Direct Launch
+
+Any tensor whose `data_ptr()` is passed to a custom direct-launch kernel must be
+contiguous in the exact linear layout the kernel assumes. If the plugin moves a
+reduction or broadcast axis with `permute`, `transpose`, `movedim`, slicing, or
+other view-producing operations, either:
+
+- call `.contiguous()` before `reshape` / `view` / `data_ptr()` and treat that
+  copy as part of the implementation cost, or
+- write a kernel that explicitly accepts and uses the original strides.
+
+Do not rely on `reshape` to hide a layout mismatch. It may return a view or a
+copy depending on stride compatibility, and a generated kernel cannot assume the
+result is row-major unless the code makes that true. During debugging, print or
+assert `is_contiguous()` for every tensor pointer handed to a custom kernel.
+
+Good:
+
+```cpp
+torch::Tensor x_moved = x.permute(perm).contiguous();
+torch::Tensor x_2d = x_moved.reshape({outer_size, reduce_size});
+auto x_ptr = (GM_ADDR)x_2d.data_ptr();
+```
+
+Bad:
+
+```cpp
+torch::Tensor x_moved = x.permute(perm);
+torch::Tensor x_2d = x_moved.reshape({outer_size, reduce_size});
+auto x_ptr = (GM_ADDR)x_2d.data_ptr();  // kernel assumes row-major contiguous
+```
+
+Evidence: Softmax round 3 candidate 1 passed build/import but failed the two
+float16 `dim=0` accuracy cases. The plugin moved `dim=0` to the last axis with
+`x.permute(perm).reshape(...)` and passed `x_2d.data_ptr()` to a row-major
+kernel. This is a reusable layout rule for all direct-launch kernels, not a
+Softmax-specific rule.
+
 ## AscendC API Policy
 
 Do not guess AscendC API signatures, headers, namespaces, type support, tiling
