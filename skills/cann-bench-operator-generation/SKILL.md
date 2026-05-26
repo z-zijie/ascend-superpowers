@@ -94,8 +94,11 @@ Treat generated source as immutable benchmark evidence.
    failure and stop. Do not fix files inside `generated/cannbench/<op>/`.
 
 Allowed generated-tree changes after the manifest are build/runtime artifacts
-only: `build/`, `dist/`, `*.egg-info`, `__pycache__/`, `.pytest_cache/`, reports,
-and profiler output. Source edits after the manifest invalidate the run.
+only: `build/`, `dist/`, `*.egg-info`, `__pycache__/`, `.pytest_cache/`,
+compiled shared objects such as `*.so` copied into the Python package, reports,
+and profiler output. Source edits after the manifest invalidate the run. When
+comparing manifests, normalize paths relative to the generated project root and
+exclude those build/runtime artifact patterns in both snapshots.
 
 ## Torch Registration Rules
 
@@ -150,6 +153,33 @@ Evidence: Exp round 3 exposed this as a reusable build rule. The schema string
 used `float`, but the C++ dispatcher functions needed `double`; see
 `LOGS/ascend-superpowers-exp/round-3/round.md` and
 `generated/cannbench/exp/csrc/ops/exp/op_plugin/exp_plugin.cpp`.
+
+PyTorch schema default literals follow Python-style parsing, not C++ literal
+spelling. In `TORCH_LIBRARY_FRAGMENT` schema strings, write boolean defaults as
+`False` or `True`, never `false` or `true`.
+
+Good:
+
+```cpp
+m.def("op_name(Tensor x, bool maximize=False) -> Tensor");
+```
+
+Bad:
+
+```cpp
+m.def("op_name(Tensor x, bool maximize=false) -> Tensor");
+```
+
+Integer defaults such as `int step=1` and mixed defaults such as
+`float eps=1e-8, int step=1, bool flag=False` are accepted by the PyTorch schema
+parser on the CANN-Bench server. If schema default support is uncertain for a
+future attr type, omit the default from the C++ schema and provide the default in
+the Python wrapper that CANN-Bench calls.
+
+Evidence: ApplyAdamW round 1 built and installed, then failed at import because
+the generated schema used `bool maximize=false`; see
+`LOGS/ascend-superpowers-apply_adam_w/round-1/round.md` and
+`LOGS/ascend-superpowers-apply_adam_w/round-1/schema-default-probe.log`.
 
 ## AscendC API Policy
 
