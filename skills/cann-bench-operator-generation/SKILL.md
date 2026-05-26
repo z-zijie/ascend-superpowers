@@ -219,6 +219,45 @@ Follow `golden.py`, not intuition.
   golden semantics.
 - Preserve output shape and dtype exactly unless the task says otherwise.
 
+For performance-critical direct-launch operators, do not satisfy FP16/BF16
+FP32-compute semantics by inserting full-tensor conversions in the torch plugin,
+such as `x.to(torch::kFloat32)` for every input and `y.to(input_dtype)` after
+the kernel. That turns a fused operator into several separate CANN operators and
+can pass accuracy while missing the CANN-Bench score target.
+
+Prefer dtype-specific AscendC kernels or template launches for `float`, `half`,
+and `bfloat16_t`. Load tensors in their original dtype, cast each tile-local
+input to `float` buffers inside the kernel, compute in FP32, then cast the
+tile-local output back to the original dtype before copying to GM. For BF16
+outputs, use the rounding mode required by evidence and golden behavior; prior
+CANN-Bench evidence used `AscendC::RoundMode::CAST_RINT` for BF16 cast-back and
+`CAST_NONE` for FP16.
+
+Keep host-side scalar precomputation in the plugin when it needs `double`, but
+pass only final `float` constants to kernels. Do not move `double` scalar math
+into AscendC kernel code: NPU Scalar computation does not support `double`.
+
+Evidence: ApplyAdamW round 3 passed all 20 accuracy cases but scored only 73.72
+because FP16/BF16 paths performed host/plugin full-tensor casts before and after
+the fused kernel; see
+`LOGS/ascend-superpowers-apply_adam_w/round-3/round.md` and
+`generated/cannbench/apply_adam_w/csrc/ops/apply_adam_w/op_plugin/apply_adam_w_plugin.cpp`.
+ForeachAddcdivScalar round 1 reached the score target using dtype-specific
+launches and tile-local FP32 casts inside the AscendC kernel; see
+`LOGS/ascend-superpowers-foreach_addcdiv_scalar/round-1/round.md` and
+`generated/cannbench/foreach_addcdiv_scalar/csrc/ops/foreach_addcdiv_scalar/op_kernel/foreach_addcdiv_scalar_kernel.cpp`.
+
+For multi-input elementwise fusion kernels, treat tile size and buffering as
+part of correctness for benchmark viability, not only as an optimization detail.
+Use double-buffered queues (`PIPELINE_DEPTH = 2`) when UB capacity permits, and
+avoid inflating queue counts or scratch queues so much that each tile becomes
+too small for memory throughput. A fixed tile size around a few thousand
+elements is a reasonable starting point for vector elementwise kernels; adjust
+downward only when the actual number of input, output, and FP32 temporary buffers
+does not fit in UB. If a generated kernel needs many FP32 temporaries, prefer
+reusing `TBuf` calculation buffers in a clear sequence over adding enough queue
+buffers to severely reduce tile length.
+
 For formulas with float scalar attrs, compute derived scalar constants in the
 host/plugin C++ wrapper from the original dispatcher parameters, then cast each
 final derived constant to the kernel-side type before launch. Do not first cast
