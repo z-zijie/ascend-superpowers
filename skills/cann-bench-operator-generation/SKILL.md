@@ -197,6 +197,17 @@ Examples of acceptable evidence:
 If no evidence exists, treat the API assumption as unverified and avoid baking
 it into the generated project or this skill.
 
+Inside AscendC `__global__` / `__aicore__` kernels, do not use C++ lambdas to
+wrap tile processing, `AllocTensor`, `DataCopyPad`, vector math, or queue
+operations. Bisheng can classify the lambda call path as host-side and emit
+errors such as "call to [aicore] function from [host] function." Use explicit
+inline code, class member methods marked `__aicore__ inline`, or ordinary
+duplicated main-loop/tail blocks instead.
+
+Evidence: ApplyAdamW round 2 initially generated a lambda inside the AscendC
+kernel and build failed with bisheng host/aicore call errors before the source
+was frozen; see `LOGS/ascend-superpowers-apply_adam_w/round-2/round.md`.
+
 ## Dtype And Precision
 
 Follow `golden.py`, not intuition.
