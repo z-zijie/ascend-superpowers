@@ -208,6 +208,53 @@ Follow `golden.py`, not intuition.
   golden semantics.
 - Preserve output shape and dtype exactly unless the task says otherwise.
 
+For formulas with float scalar attrs, compute derived scalar constants in the
+host/plugin C++ wrapper from the original dispatcher parameters, then cast each
+final derived constant to the kernel-side type before launch. Do not first cast
+a schema `float` attr to `float` and then derive numerically sensitive constants
+such as complements, powers, reciprocal denominators, or combined coefficients.
+AscendC/NPU Scalar computation does not support `double`; never use `double`
+inside `__global__`, `__aicore__`, or other NPU-side kernel code. The kernel
+should receive already-derived `float` scalars.
+
+Good:
+
+```cpp
+double inv_bias2 = 1.0 / (1.0 - std::pow(beta2, static_cast<double>(step)));
+float one_minus_beta2_f = static_cast<float>(1.0 - beta2);
+float inv_bias2_f = static_cast<float>(inv_bias2);
+```
+
+Better for optimizer/bias-correction formulas, precompute combined coefficients
+in the host wrapper and pass the final `float` coefficients to the kernel:
+
+```cpp
+double denom2 = 1.0 - std::pow(beta2, static_cast<double>(step)); // host C++ only
+float v_coeff = static_cast<float>(beta2 / denom2);
+float grad2_coeff = static_cast<float>((1.0 - beta2) / denom2);
+```
+
+Bad:
+
+```cpp
+float beta2_f = static_cast<float>(beta2);
+float one_minus_beta2 = 1.0f - beta2_f;
+float inv_bias2 = 1.0f / (1.0f - std::pow(beta2_f, static_cast<float>(step)));
+```
+
+This matters for attrs near 1.0: `beta2=0.999` rounds to
+`0.9990000128746033f`, so `1.0f - beta2_f` becomes
+`0.0009999871` instead of the task/golden value rounded from `1.0 - 0.999`.
+That small scalar error can create large MARE when outputs are near zero.
+
+Evidence: ApplyAdamW round 2 passed build/import but failed case 4 accuracy
+with score 69.47 because generated code derived `1 - beta2` and bias correction
+after casting `beta2` to `float`. The diagnostic shows generated-style constants
+produce MARE about `0.598`, while double-derived complements/bias constants
+reduce MARE below the `0.05` float32 MARE threshold; see
+`LOGS/ascend-superpowers-apply_adam_w/round-2/round.md` and
+`LOGS/ascend-superpowers-apply_adam_w/round-2/scalar-derived-constants-diagnostic.log`.
+
 ## Verification Ladder
 
 Run from `cann-bench/` with the CANN environment loaded:
