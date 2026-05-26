@@ -92,6 +92,7 @@ Treat generated source as immutable benchmark evidence.
 4. Run build, install, import, and CANN-Bench evaluation against that artifact.
 5. If build, install, import, runtime, accuracy, or scoring fails, record the
    failure and stop. Do not fix files inside `generated/cannbench/<op>/`.
+   This applies even when the fix looks mechanical or obvious.
 
 Allowed generated-tree changes after the manifest are build/runtime artifacts
 only: `build/`, `dist/`, `*.egg-info`, `__pycache__/`, `.pytest_cache/`,
@@ -99,6 +100,14 @@ compiled shared objects such as `*.so` copied into the Python package, reports,
 and profiler output. Source edits after the manifest invalidate the run. When
 comparing manifests, normalize paths relative to the generated project root and
 exclude those build/runtime artifact patterns in both snapshots.
+
+If a generated project fails during build after the source manifest is frozen,
+do not continue with "let me fix the generated source" edits. Write the build
+failure, exact compiler diagnostics, suspected reusable rule, evidence paths,
+and `continue` conclusion into the round log, then stop. Mac Codex owns the
+Harness update and fresh regeneration loop. Any source edit after the frozen
+manifest invalidates the run and must be treated as a loop failure, not as
+progress toward a valid score.
 
 ## Torch Registration Rules
 
@@ -181,6 +190,41 @@ the generated schema used `bool maximize=false`; see
 `LOGS/ascend-superpowers-apply_adam_w/round-1/round.md` and
 `LOGS/ascend-superpowers-apply_adam_w/round-1/schema-default-probe.log`.
 
+When a torch plugin passes host-computed launch parameters into an
+`OpCommand::RunOpApi` or other local lambda, do not capture C++ structured
+binding variables from the enclosing function. Some server toolchains reject
+references to structured-binding names from lambdas. Unpack tuples into
+ordinary named variables before defining the lambda, or copy the values into
+explicit `const` launch variables.
+
+Good:
+
+```cpp
+auto prepared = prepare_2d(x, dim);
+torch::Tensor x_2d = std::get<0>(prepared);
+const int64_t outer_for_launch = std::get<1>(prepared);
+const int64_t reduce_for_launch = std::get<2>(prepared);
+
+auto acl_call = [&]() -> int {
+    launch_kernel(ptr, out, outer_for_launch, reduce_for_launch, stream);
+    return 0;
+};
+```
+
+Bad:
+
+```cpp
+auto [x_2d, outer_size, reduce_size] = prepare_2d(x, dim);
+auto acl_call = [&]() -> int {
+    launch_kernel(ptr, out, outer_size, reduce_size, stream);
+    return 0;
+};
+```
+
+Evidence: Softmax round 1 build failed because the generated plugin referenced
+structured-binding names `outer_size` and `reduce_size` inside the launch
+lambda; see `LOGS/ascend-superpowers-softmax/round-1/claude-run.filtered.log`.
+
 ## AscendC API Policy
 
 Do not guess AscendC API signatures, headers, namespaces, type support, tiling
@@ -207,6 +251,41 @@ duplicated main-loop/tail blocks instead.
 Evidence: ApplyAdamW round 2 initially generated a lambda inside the AscendC
 kernel and build failed with bisheng host/aicore call errors before the source
 was frozen; see `LOGS/ascend-superpowers-apply_adam_w/round-2/round.md`.
+
+For GM-to-UB and UB-to-GM transfers in direct-launch AscendC kernels, use
+`AscendC::GlobalTensor<T>` wrappers or an already established local project
+pattern. Do not pass raw `(__gm__ T*)` pointers directly to `DataCopy` or
+`DataCopyPad` overloads from generated kernels unless the exact overload has
+been verified in `asc-devkit/`.
+
+Preferred pattern:
+
+```cpp
+AscendC::GlobalTensor<T> xGm, yGm;
+xGm.SetGlobalBuffer((__gm__ T*)x + blockOffset);
+yGm.SetGlobalBuffer((__gm__ T*)y + blockOffset);
+
+AscendC::DataCopyExtParams copyParams{1, bytes, 0, 0, 0};
+AscendC::DataCopyPadExtParams<T> padParams{false, 0, 0, 0};
+AscendC::DataCopyPad(xLocal, xGm[offset], copyParams, padParams);
+AscendC::DataCopyPad(yGm[offset], yLocal, copyParams);
+```
+
+Avoid:
+
+```cpp
+AscendC::DataCopy(xLocal, (__gm__ T*)x + offset, count);
+AscendC::DataCopyPad(xLocal, (__gm__ T*)x + offset, copyParams, padParams);
+```
+
+Evidence: Softmax round 1 failed during kernel build because generated code
+called `DataCopy` with raw GM pointers and only three arguments; CANN headers
+expose `DataCopy` overloads for `LocalTensor` plus `GlobalTensor` or additional
+parameters. See
+`LOGS/ascend-superpowers-softmax/round-1/claude-run.filtered.log`,
+`asc-devkit/include/basic_api/kernel_operator_data_copy_intf.h`, and the
+working generated examples under
+`generated/cannbench/foreach_addcdiv_scalar/csrc/ops/foreach_addcdiv_scalar/op_kernel/`.
 
 ## Dtype And Precision
 
