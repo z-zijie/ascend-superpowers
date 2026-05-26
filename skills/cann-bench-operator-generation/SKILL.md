@@ -114,6 +114,40 @@ generator-side workaround if one was attempted, evidence paths, and the proposed
 general rule. Mac Codex then updates `ascend-superpowers/` and starts a fresh
 or continued generation round with the improved Harness.
 
+## Pre-Delivery Gate
+
+Never deliver a generated operator as `complete` from a failed CANN-Bench run.
+A failed run may be useful debugging evidence, but it is not a deliverable.
+
+Before writing a `complete` conclusion, run the report gate against the latest
+CANN-Bench JSON report for the exact source candidate being delivered:
+
+```bash
+python ascend-superpowers/skills/cann-bench-operator-generation/scripts/cannbench_report_gate.py \
+  cann-bench/reports/<latest_eval>.json \
+  --min-score <required_score>
+```
+
+The gate must pass before delivery. A non-zero exit means at least one required
+condition is false: not all cases ran, not all cases succeeded, not all accuracy
+checks passed, or the score is below the requested target. In that state:
+
+- do not write `complete`
+- do not describe the operator as delivered or done
+- continue debugging the generated project when reasonable
+- otherwise write `continue` or `blocked` with failed case ids, error messages,
+  score, report path, and the next reusable Harness rule needed
+
+If the generated source changes after a report is produced, the report is stale:
+create a new source manifest, rebuild or reinstall as needed, rerun CANN-Bench,
+and rerun the report gate. The final `round.md` must include the gate command,
+exit code, JSON report path, all failed cases if any, and the conclusion.
+
+Evidence: Softmax round 3 produced a CANN-Bench report with 18/20 cases passing
+and score 57.09. That report was useful for debugging, but it failed the
+delivery gate because accuracy did not pass for all cases and the score was
+below 75.
+
 ## Torch Registration Rules
 
 Register custom ops in the `cann_bench` namespace:
@@ -417,6 +451,16 @@ PYTHONPATH=src python -m kernel_eval.cli info --operator <OpName>
 PYTHONPATH=src python -m kernel_eval.cli eval --source-dir ../generated/cannbench/<op> --operator <OpName> --device-id 0
 ```
 
-Record exact commands, exit codes, logs, report paths, and the source manifest
-comparison. A run is successful only when compile, install, import, all cases,
-all accuracy checks, and the required score are proven by current evidence.
+After eval, identify the latest JSON report and run the pre-delivery gate. For
+CANN-Bench goals that specify score >= 75:
+
+```bash
+python ../ascend-superpowers/skills/cann-bench-operator-generation/scripts/cannbench_report_gate.py \
+  reports/<latest_eval>.json \
+  --min-score 75
+```
+
+Record exact commands, exit codes, logs, report paths, gate output, and the
+source manifest comparison. A run is successful only when compile, install,
+import, all cases, all accuracy checks, and the required score are proven by
+current evidence and the report gate exits 0.
