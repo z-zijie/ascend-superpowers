@@ -322,6 +322,19 @@ Examples of acceptable evidence:
 If no evidence exists, treat the API assumption as unverified and avoid baking
 it into the generated project or this skill.
 
+Inside AscendC `__global__` / `__aicore__` kernels, do not call host C/C++
+math functions such as `expf`, `std::exp`, `powf`, `sqrtf`, `logf`, or
+`std::isfinite`. Bisheng treats those declarations as host functions and will
+reject calls from AICore code. Use verified AscendC vector math on
+`LocalTensor` buffers, keep scalar math in the host plugin when possible, or use
+an installed CANN scalar/device intrinsic only after checking header evidence
+and `__NPU_ARCH__` guards. A generated kernel that loops over elements and calls
+host math is not a valid optimization path.
+
+Evidence: Softmax round 4 candidate 2 failed during build because the optimized
+kernel called `expf` inside `__aicore__` code; see
+`LOGS/ascend-superpowers-softmax/round-4/build-candidate-2.log`.
+
 For the CANN-Bench server target `NPU_ARCH=ascend910b` / `--npu-arch=dav-2201`,
 check scalar binary vector ops especially carefully. In installed CANN 9.0.0,
 `AscendC::Subs` Level 2 is guarded to NPU_ARCH 3510, 5102, 3003, and 3113, so it
